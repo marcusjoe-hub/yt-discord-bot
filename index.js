@@ -12,8 +12,8 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-let lastVideoId = null;
-let lastShortId = null;
+// Store ALL posted video IDs (not just one)
+const postedVideos = new Set();
 let isFirstRun = true;
 
 async function getVideoDuration(videoId) {
@@ -52,17 +52,13 @@ async function checkYouTube() {
     const videos = res.data.items;
     if (!videos || videos.length === 0) return;
 
+    // First run: save ALL current videos as "already posted"
     if (isFirstRun) {
       isFirstRun = false;
       for (const video of videos) {
-        const vid = video.id.videoId;
-        const title = video.snippet.title.toLowerCase();
-        const duration = await getVideoDuration(vid);
-        const isShort = title.includes('#short') || duration <= 60;
-        if (isShort && !lastShortId) lastShortId = vid;
-        else if (!isShort && !lastVideoId) lastVideoId = vid;
+        postedVideos.add(video.id.videoId);
       }
-      console.log('✅ First run done - saved latest video IDs (no ping)');
+      console.log(`✅ First run done - saved ${postedVideos.size} existing videos (no ping)`);
       return;
     }
 
@@ -71,8 +67,16 @@ async function checkYouTube() {
 
     const rolePing = `<@&${process.env.ROLE_ID}>`;
 
+    // Loop through videos in REVERSE so oldest new video posts first
     for (const video of videos.reverse()) {
       const videoId = video.id.videoId;
+      
+      // Skip if we already posted this video
+      if (postedVideos.has(videoId)) continue;
+      
+      // Mark as posted IMMEDIATELY so we don't spam
+      postedVideos.add(videoId);
+
       const title = video.snippet.title;
       const thumbnail = video.snippet.thumbnails.high.url;
       const publishedAt = new Date(video.snippet.publishedAt).toLocaleString();
@@ -80,8 +84,7 @@ async function checkYouTube() {
       const titleLower = title.toLowerCase();
       const isShort = titleLower.includes('#short') || duration <= 60;
 
-      if (isShort && videoId !== lastShortId) {
-        lastShortId = videoId;
+      if (isShort) {
         const embed = new EmbedBuilder()
           .setTitle(`⚡ ${title}`)
           .setURL(`https://www.youtube.com/shorts/${videoId}`)
@@ -95,10 +98,7 @@ async function checkYouTube() {
 
         await channel.send({ content: `${rolePing} 🩳 **NEW SHORT UPLOADED!**`, embeds: [embed] });
         console.log(`✅ Short notification sent: ${title}`);
-      }
-
-      if (!isShort && videoId !== lastVideoId) {
-        lastVideoId = videoId;
+      } else {
         const embed = new EmbedBuilder()
           .setTitle(`🎬 ${title}`)
           .setURL(`https://www.youtube.com/watch?v=${videoId}`)
