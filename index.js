@@ -14,6 +14,7 @@ const client = new Client({
 
 const postedVideos = new Set();
 let isFirstRun = true;
+const botStartTime = Date.now();
 
 // Register slash commands
 const commands = [
@@ -23,6 +24,18 @@ const commands = [
   new SlashCommandBuilder()
     .setName('latestshort')
     .setDescription('Show the latest short from the YouTube channel'),
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Check if the bot is alive and see latency'),
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Show all available commands'),
+  new SlashCommandBuilder()
+    .setName('channel')
+    .setDescription('Show info about the YouTube channel'),
+  new SlashCommandBuilder()
+    .setName('subscribe')
+    .setDescription('Get the link to subscribe to the YouTube channel'),
 ].map(cmd => cmd.toJSON());
 
 async function getVideoDuration(videoId) {
@@ -57,6 +70,17 @@ async function fetchLatestVideos() {
     }
   });
   return res.data.items || [];
+}
+
+async function fetchChannelInfo() {
+  const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
+    params: {
+      key: process.env.YOUTUBE_API_KEY,
+      id: process.env.YOUTUBE_CHANNEL_ID,
+      part: 'snippet,statistics'
+    }
+  });
+  return res.data.items[0];
 }
 
 async function checkYouTube() {
@@ -128,11 +152,87 @@ async function checkYouTube() {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
+  // /ping
+  if (interaction.commandName === 'ping') {
+    const uptime = Math.floor((Date.now() - botStartTime) / 1000);
+    const hours = Math.floor(uptime / 3600);
+    const minutes = Math.floor((uptime % 3600) / 60);
+    const seconds = uptime % 60;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏓 Pong!')
+      .setColor(0x00ff00)
+      .addFields(
+        { name: '⚡ Latency', value: `${client.ws.ping}ms`, inline: true },
+        { name: '⏰ Uptime', value: `${hours}h ${minutes}m ${seconds}s`, inline: true },
+        { name: '✅ Status', value: 'Online & Working', inline: true }
+      )
+      .setFooter({ text: 'Bot is alive and watching for new uploads!' });
+
+    await interaction.reply({ embeds: [embed] });
+  }
+
+  // /help
+  if (interaction.commandName === 'help') {
+    const embed = new EmbedBuilder()
+      .setTitle('📋 Bot Commands')
+      .setDescription('Here are all the commands you can use:')
+      .setColor(0x5865f2)
+      .addFields(
+        { name: '🎬 `/latest`', value: 'Show the latest regular video', inline: false },
+        { name: '⚡ `/latestshort`', value: 'Show the latest short', inline: false },
+        { name: '🏓 `/ping`', value: 'Check if the bot is alive', inline: false },
+        { name: '📺 `/channel`', value: 'Show YouTube channel info & stats', inline: false },
+        { name: '🔔 `/subscribe`', value: 'Get the link to subscribe', inline: false },
+        { name: '📋 `/help`', value: 'Show this help menu', inline: false }
+      )
+      .setFooter({ text: 'Bot auto-pings the role every time a new video drops!' });
+
+    await interaction.reply({ embeds: [embed] });
+  }
+
+  // /channel
+  if (interaction.commandName === 'channel') {
+    await interaction.deferReply();
+    try {
+      const ch = await fetchChannelInfo();
+      const embed = new EmbedBuilder()
+        .setTitle(`📺 ${ch.snippet.title}`)
+        .setURL(`https://www.youtube.com/channel/${process.env.YOUTUBE_CHANNEL_ID}`)
+        .setDescription(ch.snippet.description.substring(0, 200) || 'No description')
+        .setColor(0xff0000)
+        .setThumbnail(ch.snippet.thumbnails.high.url)
+        .addFields(
+          { name: '👥 Subscribers', value: Number(ch.statistics.subscriberCount).toLocaleString(), inline: true },
+          { name: '🎥 Total Videos', value: Number(ch.statistics.videoCount).toLocaleString(), inline: true },
+          { name: '👁️ Total Views', value: Number(ch.statistics.viewCount).toLocaleString(), inline: true }
+        )
+        .setFooter({ text: 'YouTube Channel Stats' });
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (e) {
+      await interaction.editReply('❌ Error fetching channel info.');
+      console.error(e.message);
+    }
+  }
+
+  // /subscribe
+  if (interaction.commandName === 'subscribe') {
+    const embed = new EmbedBuilder()
+      .setTitle('🔔 Subscribe to the channel!')
+      .setURL(`https://www.youtube.com/channel/${process.env.YOUTUBE_CHANNEL_ID}?sub_confirmation=1`)
+      .setDescription('Click the title above to subscribe!\n\nDon\'t forget to hit the 🔔 bell so you never miss an upload!')
+      .setColor(0xff0000)
+      .setFooter({ text: 'Thanks for subscribing!' });
+
+    await interaction.reply({ embeds: [embed] });
+  }
+
+  // /latest
   if (interaction.commandName === 'latest') {
     await interaction.deferReply();
     try {
       const videos = await fetchLatestVideos();
-      // Find the latest REGULAR video (not a short)
       let latestVideo = null;
       for (const v of videos) {
         const dur = await getVideoDuration(v.id.videoId);
@@ -166,6 +266,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
+  // /latestshort
   if (interaction.commandName === 'latestshort') {
     await interaction.deferReply();
     try {
@@ -207,11 +308,10 @@ client.on('interactionCreate', async (interaction) => {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Register slash commands
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log('✅ Slash commands registered!');
+    console.log(`✅ ${commands.length} slash commands registered!`);
   } catch (e) {
     console.error('❌ Failed to register commands:', e.message);
   }
