@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════
-// 🤖 REZE BLOX YT BOT — V3.0 (DM RELAY EDITION)
+// 🤖 REZE BLOX YT BOT — V4.0 (DUAL OWNER EDITION)
 // 🛠️ Developed by chill_guy_rblx
-// 🔒 Includes private DM relay system (owner-only)
+// 🔒 Separate DM systems for each owner
+// 📩 Text file history exports
 // ═══════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -13,23 +14,17 @@ const {
   Routes, 
   SlashCommandBuilder,
   ActivityType,
-  Partials
+  Partials,
+  AttachmentBuilder,
+  MessageFlags
 } = require('discord.js');
 const axios = require('axios');
 const express = require('express');
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🌐 KEEP-ALIVE WEB SERVER
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const app = express();
 app.get('/', (req, res) => res.send('🟢 Bot is alive!'));
-app.listen(process.env.PORT || 3000, () => 
-  console.log('✅ Web server running')
-);
+app.listen(process.env.PORT || 3000, () => console.log('✅ Web server running'));
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🤖 DISCORD CLIENT (with DM intents for relay)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -40,11 +35,20 @@ const client = new Client({
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 📊 GLOBAL STATE
+// 🔒 OWNER CONFIG (read from env)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const OWNER_ID = process.env.OWNER_ID;
+const OWNER2_ID = process.env.OWNER2_ID;
 const GUILD_ID = process.env.GUILD_ID;
+const OWNERS = [OWNER_ID, OWNER2_ID].filter(Boolean);
 
+function isOwner(userId) {
+  return OWNERS.includes(userId);
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 📊 YOUTUBE STATE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const postedVideos = new Set();
 const durationCache = new Map();
 const videoCache = new Map();
@@ -53,122 +57,104 @@ let isFirstRun = true;
 const botStartTime = Date.now();
 const VIDEO_CACHE_TTL = 60 * 1000;
 
-// 📩 DM RELAY SYSTEM STATE
-const dmWhitelist = new Set();           // User IDs you've messaged
-const dmHistory = new Map();             // userId → array of message objects
-const dmBlocked = new Set();             // User IDs blocked from forwarding
-let lastDmTarget = null;                 // Last user you DM'd (for quick reply)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 📩 DM RELAY SYSTEM — SEPARATE per owner
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Structure: Map<ownerId, Set/Map> - each owner has own data
+const ownerData = new Map();
+
+function getOwnerData(ownerId) {
+  if (!ownerData.has(ownerId)) {
+    ownerData.set(ownerId, {
+      whitelist: new Set(),       // Users this owner has DM'd
+      history: new Map(),         // userId → array of messages
+      blocked: new Set(),         // Users blocked from this owner
+      activeTarget: null,         // Current chat target for this owner
+      conversationOwners: new Map() // userId → which owner started convo (for reply routing)
+    });
+  }
+  return ownerData.get(ownerId);
+}
+
+// Track which owner is "in charge" of each user (for reply routing)
+// When user X replies, only forward to the owner who started the convo with X
+const userToOwner = new Map(); // userId → ownerId
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🎮 PUBLIC SLASH COMMANDS (everyone sees)
+// 🎮 SLASH COMMANDS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const publicCommands = [
-  new SlashCommandBuilder()
-    .setName('latest')
-    .setDescription('🎬 Show the latest regular video'),
-  new SlashCommandBuilder()
-    .setName('latestshort')
-    .setDescription('⚡ Show the latest short'),
-  new SlashCommandBuilder()
-    .setName('ping')
-    .setDescription('🏓 Check if the bot is alive'),
-  new SlashCommandBuilder()
-    .setName('help')
-    .setDescription('📋 Show all available commands'),
-  new SlashCommandBuilder()
-    .setName('channel')
-    .setDescription('📺 Show YouTube channel stats'),
-  new SlashCommandBuilder()
-    .setName('subscribe')
-    .setDescription('🔔 Get the subscribe link'),
+  new SlashCommandBuilder().setName('latest').setDescription('🎬 Show the latest regular video'),
+  new SlashCommandBuilder().setName('latestshort').setDescription('⚡ Show the latest short'),
+  new SlashCommandBuilder().setName('ping').setDescription('🏓 Check if the bot is alive'),
+  new SlashCommandBuilder().setName('help').setDescription('📋 Show all available commands'),
+  new SlashCommandBuilder().setName('channel').setDescription('📺 Show YouTube channel stats'),
+  new SlashCommandBuilder().setName('subscribe').setDescription('🔔 Get the subscribe link'),
 ].map(cmd => cmd.toJSON());
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🔒 SECRET DM COMMANDS (only YOU see/use)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const secretCommands = [
-  new SlashCommandBuilder()
-    .setName('dm')
+  new SlashCommandBuilder().setName('dm')
     .setDescription('🔒 Send a DM to a user as the bot')
     .addUserOption(o => o.setName('user').setDescription('User to message').setRequired(true))
     .addStringOption(o => o.setName('message').setDescription('Message to send').setRequired(true)),
   
-  new SlashCommandBuilder()
-    .setName('reply')
+  new SlashCommandBuilder().setName('reply')
     .setDescription('🔒 Reply to a user via the bot')
     .addUserOption(o => o.setName('user').setDescription('User to reply to').setRequired(true))
     .addStringOption(o => o.setName('message').setDescription('Reply message').setRequired(true)),
   
-  new SlashCommandBuilder()
-    .setName('dm-list')
+  new SlashCommandBuilder().setName('dm-target')
+    .setDescription('🔒 Set who your DM replies forward to')
+    .addUserOption(o => o.setName('user').setDescription('User to chat with').setRequired(true)),
+  
+  new SlashCommandBuilder().setName('dm-stop')
+    .setDescription('🔒 Stop the active reply chain'),
+  
+  new SlashCommandBuilder().setName('dm-list')
     .setDescription('🔒 Show all users in your DM whitelist'),
   
-  new SlashCommandBuilder()
-    .setName('dm-history')
-    .setDescription('🔒 Show your conversation history with a user')
-    .addUserOption(o => o.setName('user').setDescription('User to view history with').setRequired(true)),
+  new SlashCommandBuilder().setName('dm-history')
+    .setDescription('🔒 Get conversation history as text file (sent to your DMs)')
+    .addUserOption(o => o.setName('user').setDescription('User to view history').setRequired(true)),
   
-  new SlashCommandBuilder()
-    .setName('dm-clear')
+  new SlashCommandBuilder().setName('dm-clear')
     .setDescription('🔒 Clear conversation history with a user')
     .addUserOption(o => o.setName('user').setDescription('User to clear history').setRequired(true)),
   
-  new SlashCommandBuilder()
-    .setName('dm-block')
+  new SlashCommandBuilder().setName('dm-block')
     .setDescription('🔒 Block/unblock user from forwarding replies')
     .addUserOption(o => o.setName('user').setDescription('User to block/unblock').setRequired(true)),
 ].map(cmd => cmd.toJSON());
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🎬 YOUTUBE HELPERS (same as V2.1 - kept perfect)
+// 🎬 YOUTUBE HELPERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function batchFetchDurations(videoIds) {
   const needToFetch = videoIds.filter(id => !durationCache.has(id));
   if (needToFetch.length === 0) {
-    return videoIds.reduce((acc, id) => {
-      acc[id] = durationCache.get(id);
-      return acc;
-    }, {});
+    return videoIds.reduce((acc, id) => { acc[id] = durationCache.get(id); return acc; }, {});
   }
-
   try {
     const res = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
-      params: {
-        key: process.env.YOUTUBE_API_KEY,
-        id: needToFetch.join(','),
-        part: 'contentDetails'
-      },
+      params: { key: process.env.YOUTUBE_API_KEY, id: needToFetch.join(','), part: 'contentDetails' },
       timeout: 15000
     });
-
     for (const item of (res.data.items || [])) {
       const duration = item.contentDetails?.duration || '';
       const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-      const hours = parseInt(match?.[1] || 0);
-      const minutes = parseInt(match?.[2] || 0);
-      const seconds = parseInt(match?.[3] || 0);
-      durationCache.set(item.id, hours * 3600 + minutes * 60 + seconds);
+      const h = parseInt(match?.[1] || 0), m = parseInt(match?.[2] || 0), s = parseInt(match?.[3] || 0);
+      durationCache.set(item.id, h * 3600 + m * 60 + s);
     }
-  } catch (error) {
-    console.error('⚠️ Batch duration fetch failed:', error.message);
-  }
-
-  return videoIds.reduce((acc, id) => {
-    acc[id] = durationCache.get(id) || 999;
-    return acc;
-  }, {});
+  } catch (e) { console.error('⚠️ Duration fetch failed:', e.message); }
+  return videoIds.reduce((acc, id) => { acc[id] = durationCache.get(id) || 999; return acc; }, {});
 }
 
-function isShortVideo(title, durationSec) {
-  const titleLower = (title || '').toLowerCase();
-  const shortKeywords = ['#short', '#shorts', '#ytshort', '#ytshorts'];
-  const hasShortTag = shortKeywords.some(tag => titleLower.includes(tag));
-  const isShortDuration = durationSec > 0 && durationSec <= 65;
-  return hasShortTag || isShortDuration;
+function isShortVideo(title, dur) {
+  const t = (title || '').toLowerCase();
+  const tags = ['#short', '#shorts', '#ytshort', '#ytshorts'];
+  return tags.some(tag => t.includes(tag)) || (dur > 0 && dur <= 65);
 }
 
 async function fetchLatestVideos(force = false) {
@@ -176,48 +162,30 @@ async function fetchLatestVideos(force = false) {
   if (!force && videoCache.size > 0 && (now - videoCacheTime) < VIDEO_CACHE_TTL) {
     return Array.from(videoCache.values());
   }
-
   try {
     const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
-      params: {
-        key: process.env.YOUTUBE_API_KEY,
-        channelId: process.env.YOUTUBE_CHANNEL_ID,
-        part: 'snippet',
-        order: 'date',
-        maxResults: 10,
-        type: 'video'
-      },
+      params: { key: process.env.YOUTUBE_API_KEY, channelId: process.env.YOUTUBE_CHANNEL_ID,
+        part: 'snippet', order: 'date', maxResults: 10, type: 'video' },
       timeout: 15000
     });
-
     const videos = res.data.items || [];
     videoCache.clear();
-    for (const v of videos) {
-      videoCache.set(v.id.videoId, v);
-    }
+    for (const v of videos) videoCache.set(v.id.videoId, v);
     videoCacheTime = now;
     return videos;
-  } catch (error) {
-    console.error('⚠️ Fetch videos failed:', error.message);
+  } catch (e) {
+    console.error('⚠️ Fetch failed:', e.message);
     if (videoCache.size > 0) return Array.from(videoCache.values());
-    throw error;
+    throw e;
   }
 }
 
-let channelInfoCache = null;
-let channelInfoCacheTime = 0;
-
+let channelInfoCache = null, channelInfoCacheTime = 0;
 async function fetchChannelInfo() {
   const now = Date.now();
-  if (channelInfoCache && (now - channelInfoCacheTime) < 5 * 60 * 1000) {
-    return channelInfoCache;
-  }
+  if (channelInfoCache && (now - channelInfoCacheTime) < 5 * 60 * 1000) return channelInfoCache;
   const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
-    params: {
-      key: process.env.YOUTUBE_API_KEY,
-      id: process.env.YOUTUBE_CHANNEL_ID,
-      part: 'snippet,statistics'
-    },
+    params: { key: process.env.YOUTUBE_API_KEY, id: process.env.YOUTUBE_CHANNEL_ID, part: 'snippet,statistics' },
     timeout: 15000
   });
   channelInfoCache = res.data.items[0];
@@ -226,21 +194,15 @@ async function fetchChannelInfo() {
 }
 
 function createVideoEmbed(video, isShort) {
-  const videoId = video.id.videoId;
-  const title = video.snippet.title;
-  const thumbnail = video.snippet.thumbnails.high.url;
-  const publishedAt = new Date(video.snippet.publishedAt).toLocaleString();
-  const url = isShort 
-    ? `https://www.youtube.com/shorts/${videoId}` 
-    : `https://www.youtube.com/watch?v=${videoId}`;
-  
+  const vid = video.id.videoId, title = video.snippet.title;
+  const thumb = video.snippet.thumbnails.high.url;
+  const pub = new Date(video.snippet.publishedAt).toLocaleString();
+  const url = isShort ? `https://www.youtube.com/shorts/${vid}` : `https://www.youtube.com/watch?v=${vid}`;
   return new EmbedBuilder()
-    .setTitle(`${isShort ? '⚡' : '🎬'} ${title}`)
-    .setURL(url)
-    .setColor(isShort ? 0x00ff99 : 0xff0000)
-    .setImage(thumbnail)
+    .setTitle(`${isShort ? '⚡' : '🎬'} ${title}`).setURL(url)
+    .setColor(isShort ? 0x00ff99 : 0xff0000).setImage(thumb)
     .addFields(
-      { name: '📅 Posted', value: publishedAt, inline: true },
+      { name: '📅 Posted', value: pub, inline: true },
       { name: '▶️ Watch', value: `[Click Here](${url})`, inline: true }
     )
     .setFooter({ text: isShort ? 'Reze Blox YT • Latest Short' : 'Reze Blox YT • Latest Video' })
@@ -250,90 +212,59 @@ function createVideoEmbed(video, isShort) {
 async function findLatestByType(wantShort) {
   const videos = await fetchLatestVideos();
   if (videos.length === 0) return null;
-  const videoIds = videos.map(v => v.id.videoId);
-  const durations = await batchFetchDurations(videoIds);
+  const ids = videos.map(v => v.id.videoId);
+  const durs = await batchFetchDurations(ids);
   for (const v of videos) {
-    const dur = durations[v.id.videoId] || 999;
-    const isShort = isShortVideo(v.snippet.title, dur);
+    const isShort = isShortVideo(v.snippet.title, durs[v.id.videoId] || 999);
     if (isShort === wantShort) return v;
   }
   return null;
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🔄 MAIN YOUTUBE CHECK LOOP (AUTO-PINGS)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function checkYouTube() {
   try {
     const videos = await fetchLatestVideos(true);
     if (!videos || videos.length === 0) return;
-
     if (isFirstRun) {
       isFirstRun = false;
       for (const v of videos) postedVideos.add(v.id.videoId);
       console.log(`✅ First run done - ${postedVideos.size} videos memorized (no pings)`);
       return;
     }
-
     const channel = client.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
-    if (!channel) return console.log('❌ Discord channel not found');
-
+    if (!channel) return;
     const rolePing = `<@&${process.env.ROLE_ID}>`;
     const newVideos = videos.filter(v => !postedVideos.has(v.id.videoId));
     if (newVideos.length === 0) return;
-
-    const newVideoIds = newVideos.map(v => v.id.videoId);
-    const durations = await batchFetchDurations(newVideoIds);
-
+    const ids = newVideos.map(v => v.id.videoId);
+    const durs = await batchFetchDurations(ids);
     for (const video of newVideos.reverse()) {
       const videoId = video.id.videoId;
       postedVideos.add(videoId);
-
-      const title = video.snippet.title;
-      const duration = durations[videoId] || 999;
-      const isShort = isShortVideo(title, duration);
+      const isShort = isShortVideo(video.snippet.title, durs[videoId] || 999);
       const embed = createVideoEmbed(video, isShort);
-
       try {
         const message = await channel.send({
           content: `${rolePing} ${isShort ? '🩳 **NEW SHORT UPLOADED!**' : '🎥 **NEW VIDEO UPLOADED!**'}`,
           embeds: [embed]
         });
-
-        try {
-          await message.react('🎉');
-          await sleep(500);
-          await message.react('🔔');
-        } catch (e) {}
-
-        console.log(`✅ ${isShort ? 'SHORT' : 'VIDEO'} notification sent: "${title}"`);
+        try { await message.react('🎉'); await sleep(500); await message.react('🔔'); } catch (e) {}
+        console.log(`✅ ${isShort ? 'SHORT' : 'VIDEO'} sent: "${video.snippet.title}"`);
         await sleep(1500);
-      } catch (sendErr) {
-        console.error('❌ Failed to send notification:', sendErr.message);
-      }
+      } catch (e) { console.error('❌ Send failed:', e.message); }
     }
-  } catch (error) {
-    if (error.response?.status === 429) {
-      console.error('⚠️ Rate limited (429) - will retry next interval');
-    } else {
-      console.error('❌ YouTube check error:', error.message);
-    }
+  } catch (e) {
+    if (e.response?.status === 429) console.error('⚠️ Rate limited (429)');
+    else console.error('❌ YouTube error:', e.message);
   }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 📩 DM RELAY HELPERS
+// 📩 DM SYSTEM HELPERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-/**
- * Create a beautiful DM embed (Royal Guard style)
- */
 function createDmEmbed(message, isReply = false) {
   return new EmbedBuilder()
-    .setAuthor({ 
-      name: 'Reze Blox YT',
-      iconURL: client.user?.displayAvatarURL()
-    })
+    .setAuthor({ name: 'Reze Blox YT', iconURL: client.user?.displayAvatarURL() })
     .setTitle(isReply ? '💬 Reply' : '📩 New Message')
     .setDescription(message)
     .setColor(0x5865f2)
@@ -341,46 +272,27 @@ function createDmEmbed(message, isReply = false) {
     .setFooter({ text: 'Sent via Reze Blox YT Bot' });
 }
 
-/**
- * Save message to history
- */
-function saveToHistory(userId, direction, content) {
-  if (!dmHistory.has(userId)) {
-    dmHistory.set(userId, []);
-  }
-  const history = dmHistory.get(userId);
-  history.push({
-    direction,        // 'sent' or 'received'
+function saveToHistory(ownerId, userId, direction, content) {
+  const data = getOwnerData(ownerId);
+  if (!data.history.has(userId)) data.history.set(userId, []);
+  data.history.get(userId).push({
+    direction,
     content,
     timestamp: Date.now()
   });
-  // Keep only last 50 messages per user (memory management)
-  if (history.length > 50) {
-    history.shift();
-  }
 }
 
-/**
- * Send a DM to a user as the bot
- */
 async function sendDM(userId, message, isReply = false) {
   const user = await client.users.fetch(userId);
   const embed = createDmEmbed(message, isReply);
   return await user.send({ embeds: [embed] });
 }
 
-/**
- * Forward a reply to the owner
- */
-async function forwardReplyToOwner(fromUser, messageContent) {
+async function forwardReplyToOwner(ownerId, fromUser, messageContent) {
   try {
-    const owner = await client.users.fetch(OWNER_ID);
-    
+    const owner = await client.users.fetch(ownerId);
     const embed = new EmbedBuilder()
-      .setAuthor({ 
-        name: `${fromUser.tag}`, 
-        iconURL: fromUser.displayAvatarURL() 
-      })
+      .setAuthor({ name: `${fromUser.tag}`, iconURL: fromUser.displayAvatarURL() })
       .setTitle('📩 NEW REPLY')
       .setColor(0x00ff00)
       .addFields(
@@ -389,50 +301,69 @@ async function forwardReplyToOwner(fromUser, messageContent) {
         { name: '⏰ Time', value: `<t:${Math.floor(Date.now()/1000)}:R>`, inline: true },
         { name: '📝 Message', value: messageContent.substring(0, 1024) || '*(empty)*', inline: false }
       )
-      .setFooter({ text: `Use /reply @user to respond, or just DM the bot back` })
+      .setFooter({ text: `Use /reply @user, or /dm-target then DM the bot` })
       .setTimestamp();
-    
     await owner.send({ embeds: [embed] });
-    lastDmTarget = fromUser.id;
-  } catch (e) {
-    console.error('❌ Failed to forward to owner:', e.message);
-  }
+  } catch (e) { console.error('❌ Forward to owner failed:', e.message); }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 💬 MESSAGE EVENT — Listen for DMs to the bot
+// 💬 MESSAGE EVENT — handles incoming DMs
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.on('messageCreate', async (message) => {
-  // Ignore bot messages
   if (message.author.bot) return;
-  
-  // Only care about DMs
   if (message.guild) return;
   
   const userId = message.author.id;
   const content = message.content || '*(no text)*';
   
-  // ━━━ CASE 1: Owner is DMing the bot ━━━
-  // Auto-forward to the last person they messaged
-  if (userId === OWNER_ID) {
-    if (!lastDmTarget) {
-      return message.reply('❌ No recent DM target. Use `/dm @user message` first to start a conversation.');
+  // ━━━ CASE 1: OWNER is DM'ing the bot ━━━
+  if (isOwner(userId)) {
+    const data = getOwnerData(userId);
+    
+    if (!data.activeTarget) {
+      return message.reply('⚠️ No active reply target. Use `/dm-target @user` first, or use `/dm @user message` to start a conversation.').catch(()=>{});
+    }
+    
+    if (data.activeTarget === userId) {
+      return message.reply('❌ Can\'t reply to yourself.').catch(()=>{});
+    }
+    
+    if (isOwner(data.activeTarget)) {
+      return message.reply('❌ Can\'t target another owner.').catch(()=>{});
     }
     
     try {
-      await sendDM(lastDmTarget, content, true);
-      saveToHistory(lastDmTarget, 'sent', content);
+      await sendDM(data.activeTarget, content, true);
+      saveToHistory(userId, data.activeTarget, 'sent', content);
       await message.react('✅');
     } catch (e) {
-      await message.reply(`❌ Failed to send: ${e.message}`);
+      await message.reply(`❌ Failed to send: ${e.message}\n*(They may have DMs disabled)*`).catch(()=>{});
     }
     return;
   }
   
-  // ━━━ CASE 2: Non-owner DMing the bot ━━━
-  // Check if user is in whitelist (you've messaged them before)
-  if (!dmWhitelist.has(userId)) {
-    // Send auto-reply (non-whitelisted)
+  // ━━━ CASE 2: Non-owner DM'ing the bot ━━━
+  
+  // Find which owner has this user in their whitelist
+  let targetOwner = null;
+  for (const oid of OWNERS) {
+    const data = getOwnerData(oid);
+    if (data.whitelist.has(userId)) {
+      targetOwner = oid;
+      break;
+    }
+  }
+  
+  // Not in ANY owner's whitelist → auto-reply once
+  if (!targetOwner) {
+    // Check if we already auto-replied (use first owner's history as flag)
+    const data = getOwnerData(OWNERS[0]);
+    const existing = data.history.get(userId);
+    if (existing && existing.some(h => h.direction === 'auto-reply')) {
+      return; // Already auto-replied, ignore silently
+    }
+    
     try {
       const autoReply = new EmbedBuilder()
         .setTitle('👋 Hello!')
@@ -443,20 +374,19 @@ client.on('messageCreate', async (message) => {
         )
         .setColor(0x5865f2)
         .setFooter({ text: 'Automated Response' });
-      
       await message.reply({ embeds: [autoReply] });
+      saveToHistory(OWNERS[0], userId, 'auto-reply', '[Auto-reply sent]');
     } catch (e) {}
     return;
   }
   
-  // Check if blocked
-  if (dmBlocked.has(userId)) return;
+  // Check if blocked by this owner
+  const data = getOwnerData(targetOwner);
+  if (data.blocked.has(userId)) return;
   
-  // Forward to owner!
-  await forwardReplyToOwner(message.author, content);
-  saveToHistory(userId, 'received', content);
-  
-  // React to confirm we received it
+  // Forward ONLY to the owner who started the convo
+  await forwardReplyToOwner(targetOwner, message.author, content);
+  saveToHistory(targetOwner, userId, 'received', content);
   try { await message.react('📨'); } catch (e) {}
 });
 
@@ -465,67 +395,70 @@ client.on('messageCreate', async (message) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  
   const cmd = interaction.commandName;
-  const isSecretCmd = ['dm', 'reply', 'dm-list', 'dm-history', 'dm-clear', 'dm-block'].includes(cmd);
+  const userId = interaction.user.id;
+  const isSecret = ['dm', 'reply', 'dm-list', 'dm-history', 'dm-clear', 'dm-block', 'dm-target', 'dm-stop'].includes(cmd);
   
-  // 🔒 SECURITY: Block non-owners from secret commands
-  if (isSecretCmd && interaction.user.id !== OWNER_ID) {
-    return interaction.reply({ content: '❌ Unknown command.', ephemeral: true }).catch(() => {});
+  // 🔒 SECURITY: only owners can use secret commands
+  if (isSecret && !isOwner(userId)) {
+    return interaction.reply({ content: '❌ Unknown command.', flags: MessageFlags.Ephemeral }).catch(() => {});
   }
 
   try {
-    // ═══════════════════════════════════════════════
-    // 🔒 SECRET DM COMMANDS
-    // ═══════════════════════════════════════════════
-    
+    // ━━━━━ /dm ━━━━━
     if (cmd === 'dm') {
       const user = interaction.options.getUser('user');
-      const message = interaction.options.getString('message');
+      const msg = interaction.options.getString('message');
       
-      await interaction.deferReply({ ephemeral: true });
+      if (user.id === userId) return interaction.reply({ content: '❌ Can\'t DM yourself!', flags: MessageFlags.Ephemeral });
+      if (user.bot) return interaction.reply({ content: '❌ Can\'t DM bots!', flags: MessageFlags.Ephemeral });
+      if (isOwner(user.id)) return interaction.reply({ content: '❌ Can\'t DM another owner!', flags: MessageFlags.Ephemeral });
       
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       try {
-        await sendDM(user.id, message, false);
-        dmWhitelist.add(user.id);
-        saveToHistory(user.id, 'sent', message);
-        lastDmTarget = user.id;
+        await sendDM(user.id, msg, false);
+        const data = getOwnerData(userId);
+        data.whitelist.add(user.id);
+        data.activeTarget = user.id;
+        saveToHistory(userId, user.id, 'sent', msg);
         
-        const confirmEmbed = new EmbedBuilder()
-          .setTitle('✅ DM Sent')
-          .setColor(0x00ff00)
+        const embed = new EmbedBuilder()
+          .setTitle('✅ DM Sent').setColor(0x00ff00)
           .addFields(
             { name: '👤 To', value: `${user.tag} (\`${user.id}\`)`, inline: false },
-            { name: '📝 Message', value: message.substring(0, 1024), inline: false }
+            { name: '📝 Message', value: msg.substring(0, 1024), inline: false },
+            { name: '🎯 Active Target', value: 'Set to this user — just DM the bot to continue', inline: false }
           )
-          .setFooter({ text: 'They\'re now whitelisted - replies will forward to you' })
+          .setFooter({ text: 'They\'re whitelisted. Their replies will forward to your DMs.' })
           .setTimestamp();
-        
-        await interaction.editReply({ embeds: [confirmEmbed] });
+        await interaction.editReply({ embeds: [embed] });
       } catch (e) {
-        await interaction.editReply(`❌ Failed to DM: ${e.message}\n*(They may have DMs disabled)*`);
+        await interaction.editReply(`❌ Failed: ${e.message}\n*(They may have DMs disabled)*`);
       }
       return;
     }
     
+    // ━━━━━ /reply ━━━━━
     if (cmd === 'reply') {
       const user = interaction.options.getUser('user');
-      const message = interaction.options.getString('message');
+      const msg = interaction.options.getString('message');
       
-      await interaction.deferReply({ ephemeral: true });
+      if (user.id === userId) return interaction.reply({ content: '❌ Can\'t reply to yourself!', flags: MessageFlags.Ephemeral });
+      if (user.bot) return interaction.reply({ content: '❌ Can\'t reply to bots!', flags: MessageFlags.Ephemeral });
+      if (isOwner(user.id)) return interaction.reply({ content: '❌ Can\'t reply to another owner!', flags: MessageFlags.Ephemeral });
       
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       try {
-        await sendDM(user.id, message, true);
-        dmWhitelist.add(user.id);
-        saveToHistory(user.id, 'sent', message);
-        lastDmTarget = user.id;
-        
+        await sendDM(user.id, msg, true);
+        const data = getOwnerData(userId);
+        data.whitelist.add(user.id);
+        data.activeTarget = user.id;
+        saveToHistory(userId, user.id, 'sent', msg);
         await interaction.editReply({
           embeds: [new EmbedBuilder()
-            .setTitle('✅ Reply Sent')
-            .setColor(0x00ff00)
+            .setTitle('✅ Reply Sent').setColor(0x00ff00)
             .setDescription(`Replied to ${user.tag}`)
-            .addFields({ name: '📝 Message', value: message.substring(0, 1024) })
+            .addFields({ name: '📝 Message', value: msg.substring(0, 1024) })
           ]
         });
       } catch (e) {
@@ -534,119 +467,162 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     
-    if (cmd === 'dm-list') {
-      if (dmWhitelist.size === 0) {
-        return interaction.reply({ content: '📭 Your DM whitelist is empty.', ephemeral: true });
-      }
+    // ━━━━━ /dm-target ━━━━━
+    if (cmd === 'dm-target') {
+      const user = interaction.options.getUser('user');
       
+      if (user.id === userId) return interaction.reply({ content: '❌ Can\'t target yourself!', flags: MessageFlags.Ephemeral });
+      if (user.bot) return interaction.reply({ content: '❌ Can\'t target bots!', flags: MessageFlags.Ephemeral });
+      if (isOwner(user.id)) return interaction.reply({ content: '❌ Can\'t target another owner!', flags: MessageFlags.Ephemeral });
+      
+      const data = getOwnerData(userId);
+      data.activeTarget = user.id;
+      data.whitelist.add(user.id);
+      
+      const embed = new EmbedBuilder()
+        .setTitle('🎯 Reply Target Set').setColor(0x00ff00)
+        .setDescription(`Now you can just DM the bot and it will forward to **${user.tag}**`)
+        .addFields(
+          { name: '👤 Target', value: `${user.tag} (\`${user.id}\`)`, inline: false },
+          { name: '💡 Tip', value: 'Use `/dm-stop` to end this conversation', inline: false }
+        );
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+    }
+    
+    // ━━━━━ /dm-stop ━━━━━
+    if (cmd === 'dm-stop') {
+      const data = getOwnerData(userId);
+      data.activeTarget = null;
+      return interaction.reply({ 
+        content: '🛑 Active reply target cleared. DMs won\'t forward until you set a new target.', 
+        flags: MessageFlags.Ephemeral 
+      });
+    }
+    
+    // ━━━━━ /dm-list ━━━━━
+    if (cmd === 'dm-list') {
+      const data = getOwnerData(userId);
+      if (data.whitelist.size === 0) {
+        return interaction.reply({ content: '📭 Your DM whitelist is empty.', flags: MessageFlags.Ephemeral });
+      }
       const users = await Promise.all(
-        Array.from(dmWhitelist).map(async (id) => {
+        Array.from(data.whitelist).map(async (id) => {
           try {
             const u = await client.users.fetch(id);
-            const blocked = dmBlocked.has(id) ? ' 🚫' : '';
-            const msgCount = dmHistory.get(id)?.length || 0;
-            return `• ${u.tag} (\`${id}\`) — ${msgCount} messages${blocked}`;
-          } catch (e) {
-            return `• Unknown (\`${id}\`)`;
-          }
+            const blocked = data.blocked.has(id) ? ' 🚫' : '';
+            const active = id === data.activeTarget ? ' 🎯' : '';
+            const count = data.history.get(id)?.length || 0;
+            return `• ${u.tag} (\`${id}\`) — ${count} msgs${blocked}${active}`;
+          } catch (e) { return `• Unknown (\`${id}\`)`; }
         })
       );
-      
       const embed = new EmbedBuilder()
-        .setTitle('📋 DM Whitelist')
-        .setDescription(users.join('\n'))
+        .setTitle('📋 Your DM Whitelist').setDescription(users.join('\n'))
         .setColor(0x5865f2)
-        .setFooter({ text: `Total: ${dmWhitelist.size} users | 🚫 = blocked` });
-      
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-      return;
+        .setFooter({ text: `Total: ${data.whitelist.size} | 🎯 = active target | 🚫 = blocked` });
+      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
     
+    // ━━━━━ /dm-history (TEXT FILE → YOUR DMs) ━━━━━
     if (cmd === 'dm-history') {
       const user = interaction.options.getUser('user');
-      const history = dmHistory.get(user.id);
+      const data = getOwnerData(userId);
+      const history = data.history.get(user.id);
       
       if (!history || history.length === 0) {
-        return interaction.reply({ content: `📭 No history with ${user.tag}`, ephemeral: true });
+        return interaction.reply({ content: `📭 No history with ${user.tag}`, flags: MessageFlags.Ephemeral });
       }
       
-      const messages = history.slice(-20).map(msg => {
-        const arrow = msg.direction === 'sent' ? '➡️ You' : '⬅️ Them';
-        const time = `<t:${Math.floor(msg.timestamp/1000)}:t>`;
-        return `${arrow} ${time}\n\`${msg.content.substring(0, 200)}\``;
-      }).join('\n\n');
+      // Build text file content
+      const lines = [
+        `═══════════════════════════════════════════════`,
+        `📜 DM HISTORY EXPORT`,
+        `═══════════════════════════════════════════════`,
+        `👤 Conversation with: ${user.tag} (${user.id})`,
+        `👑 Owner: ${interaction.user.tag} (${userId})`,
+        `📊 Total messages: ${history.length}`,
+        `📅 Exported: ${new Date().toLocaleString()}`,
+        `═══════════════════════════════════════════════`,
+        ``
+      ];
       
-      const embed = new EmbedBuilder()
-        .setTitle(`💬 History with ${user.tag}`)
-        .setDescription(messages.substring(0, 4000))
-        .setColor(0x5865f2)
-        .setFooter({ text: `Showing last ${Math.min(20, history.length)} of ${history.length} messages` });
+      for (const msg of history) {
+        const time = new Date(msg.timestamp).toLocaleString();
+        let prefix = '➡️ YOU';
+        if (msg.direction === 'received') prefix = '⬅️ THEM';
+        if (msg.direction === 'auto-reply') prefix = '🤖 AUTO-REPLY';
+        lines.push(`[${time}] ${prefix}`);
+        lines.push(`${msg.content}`);
+        lines.push('');
+      }
       
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-      return;
+      const fileContent = lines.join('\n');
+      const buffer = Buffer.from(fileContent, 'utf-8');
+      const filename = `dm-history-${user.username}-${Date.now()}.txt`;
+      const attachment = new AttachmentBuilder(buffer, { name: filename });
+      
+      // Send to YOUR DMs (not in channel)
+      try {
+        const ownerUser = await client.users.fetch(userId);
+        await ownerUser.send({
+          content: `📜 **DM History Export**\nConversation with ${user.tag} — ${history.length} messages`,
+          files: [attachment]
+        });
+        
+        // Confirm in channel (ephemeral)
+        return interaction.reply({
+          content: `✅ History sent to your DMs as a text file! (${history.length} messages)`,
+          flags: MessageFlags.Ephemeral
+        });
+      } catch (e) {
+        return interaction.reply({
+          content: `❌ Couldn't DM you the file. Make sure your DMs are open!\nError: ${e.message}`,
+          flags: MessageFlags.Ephemeral
+        });
+      }
     }
     
+    // ━━━━━ /dm-clear ━━━━━
     if (cmd === 'dm-clear') {
       const user = interaction.options.getUser('user');
-      dmHistory.delete(user.id);
-      
-      await interaction.reply({ 
-        content: `✅ Cleared conversation history with ${user.tag}`, 
-        ephemeral: true 
-      });
-      return;
+      const data = getOwnerData(userId);
+      data.history.delete(user.id);
+      return interaction.reply({ content: `✅ Cleared history with ${user.tag}`, flags: MessageFlags.Ephemeral });
     }
     
+    // ━━━━━ /dm-block ━━━━━
     if (cmd === 'dm-block') {
       const user = interaction.options.getUser('user');
-      
-      if (dmBlocked.has(user.id)) {
-        dmBlocked.delete(user.id);
-        await interaction.reply({ 
-          content: `✅ Unblocked ${user.tag} - their replies will forward again`, 
-          ephemeral: true 
-        });
+      const data = getOwnerData(userId);
+      if (data.blocked.has(user.id)) {
+        data.blocked.delete(user.id);
+        return interaction.reply({ content: `✅ Unblocked ${user.tag}`, flags: MessageFlags.Ephemeral });
       } else {
-        dmBlocked.add(user.id);
-        await interaction.reply({ 
-          content: `🚫 Blocked ${user.tag} - their replies won't forward`, 
-          ephemeral: true 
-        });
+        data.blocked.add(user.id);
+        return interaction.reply({ content: `🚫 Blocked ${user.tag}`, flags: MessageFlags.Ephemeral });
       }
-      return;
     }
 
-    // ═══════════════════════════════════════════════
-    // 🌍 PUBLIC COMMANDS
-    // ═══════════════════════════════════════════════
-    
+    // ━━━━━ PUBLIC COMMANDS ━━━━━
     if (cmd === 'ping') {
-      const uptime = Math.floor((Date.now() - botStartTime) / 1000);
-      const hours = Math.floor(uptime / 3600);
-      const minutes = Math.floor((uptime % 3600) / 60);
-      const seconds = uptime % 60;
-
-      const embed = new EmbedBuilder()
-        .setTitle('🏓 Pong!')
-        .setColor(0x00ff00)
+      const up = Math.floor((Date.now() - botStartTime) / 1000);
+      const h = Math.floor(up / 3600), m = Math.floor((up % 3600) / 60), s = up % 60;
+      const embed = new EmbedBuilder().setTitle('🏓 Pong!').setColor(0x00ff00)
         .addFields(
           { name: '⚡ Latency', value: `${client.ws.ping}ms`, inline: true },
-          { name: '⏰ Uptime', value: `${hours}h ${minutes}m ${seconds}s`, inline: true },
+          { name: '⏰ Uptime', value: `${h}h ${m}m ${s}s`, inline: true },
           { name: '✅ Status', value: 'Online & Watching', inline: true },
-          { name: '📺 Videos Tracked', value: `${postedVideos.size}`, inline: true },
+          { name: '📺 Tracked', value: `${postedVideos.size}`, inline: true },
           { name: '💾 Cache', value: `${durationCache.size}`, inline: true },
-          { name: '🔄 Check Every', value: '5 minutes', inline: true }
-        )
-        .setFooter({ text: 'Bot is alive and watching for uploads!' })
-        .setTimestamp();
-
+          { name: '🔄 Check', value: 'Every 5 min', inline: true }
+        ).setFooter({ text: 'Bot is alive!' }).setTimestamp();
       return await interaction.reply({ embeds: [embed] });
     }
 
     if (cmd === 'help') {
       const embed = new EmbedBuilder()
         .setTitle('📋 Bot Commands Menu')
-        .setDescription('Here are all the commands you can use:\n\u200b')
+        .setDescription('Here are all available commands:\n\u200b')
         .setColor(0x5865f2)
         .addFields(
           { name: '🎬 `/latest`', value: 'Show the latest regular video', inline: false },
@@ -658,7 +634,6 @@ client.on('interactionCreate', async (interaction) => {
         )
         .setFooter({ text: '🚨 Bot auto-pings the role when a new video drops!' })
         .setTimestamp();
-
       return await interaction.reply({ embeds: [embed] });
     }
 
@@ -669,77 +644,53 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle(`📺 ${ch.snippet.title}`)
         .setURL(`https://www.youtube.com/channel/${process.env.YOUTUBE_CHANNEL_ID}`)
         .setDescription(ch.snippet.description?.substring(0, 200) || 'No description')
-        .setColor(0xff0000)
-        .setThumbnail(ch.snippet.thumbnails.high.url)
+        .setColor(0xff0000).setThumbnail(ch.snippet.thumbnails.high.url)
         .addFields(
           { name: '👥 Subscribers', value: Number(ch.statistics.subscriberCount).toLocaleString(), inline: true },
           { name: '🎥 Videos', value: Number(ch.statistics.videoCount).toLocaleString(), inline: true },
           { name: '👁️ Views', value: Number(ch.statistics.viewCount).toLocaleString(), inline: true }
-        )
-        .setFooter({ text: 'YouTube Channel Statistics' })
-        .setTimestamp();
+        ).setTimestamp();
       return await interaction.editReply({ embeds: [embed] });
     }
 
     if (cmd === 'subscribe') {
-      const subUrl = `https://www.youtube.com/channel/${process.env.YOUTUBE_CHANNEL_ID}?sub_confirmation=1`;
+      const url = `https://www.youtube.com/channel/${process.env.YOUTUBE_CHANNEL_ID}?sub_confirmation=1`;
       const embed = new EmbedBuilder()
-        .setTitle('🔔 Subscribe to the channel!')
-        .setURL(subUrl)
-        .setDescription(
-          '👆 **Click the title to subscribe!**\n\n' +
-          'Don\'t forget to hit the 🔔 bell so you never miss an upload!\n\n' +
-          '✨ Thanks for the support!'
-        )
-        .setColor(0xff0000)
-        .setFooter({ text: 'Smash that subscribe button!' });
+        .setTitle('🔔 Subscribe!').setURL(url)
+        .setDescription('👆 **Click the title to subscribe!**\n\nHit the 🔔 bell so you never miss an upload!')
+        .setColor(0xff0000);
       return await interaction.reply({ embeds: [embed] });
     }
 
     if (cmd === 'latest') {
       await interaction.deferReply();
       const video = await findLatestByType(false);
-      if (!video) return await interaction.editReply('❌ No regular videos found!');
-      const embed = createVideoEmbed(video, false);
-      return await interaction.editReply({ content: '🎥 **Latest Video:**', embeds: [embed] });
+      if (!video) return await interaction.editReply('❌ No videos found!');
+      return await interaction.editReply({ content: '🎥 **Latest Video:**', embeds: [createVideoEmbed(video, false)] });
     }
 
     if (cmd === 'latestshort') {
       await interaction.deferReply();
       const video = await findLatestByType(true);
       if (!video) return await interaction.editReply('❌ No shorts found!');
-      const embed = createVideoEmbed(video, true);
-      return await interaction.editReply({ content: '🩳 **Latest Short:**', embeds: [embed] });
+      return await interaction.editReply({ content: '🩳 **Latest Short:**', embeds: [createVideoEmbed(video, true)] });
     }
-
-  } catch (error) {
-    console.error(`❌ Command error (${cmd}):`, error.message);
-    
-    let errorMsg = '❌ Something went wrong. Try again!';
-    if (error.response?.status === 429) {
-      errorMsg = '⚠️ Too many requests! Wait a minute.';
-    }
-
+  } catch (e) {
+    console.error(`❌ Command error (${cmd}):`, e.message);
+    let msg = '❌ Something went wrong!';
+    if (e.response?.status === 429) msg = '⚠️ Too many requests! Wait a minute.';
     try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply(errorMsg);
-      } else {
-        await interaction.reply({ content: errorMsg, ephemeral: true });
-      }
-    } catch (e) {}
+      if (interaction.deferred || interaction.replied) await interaction.editReply(msg);
+      else await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral });
+    } catch (err) {}
   }
 });
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🚀 STARTUP
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.once('ready', async () => {
   console.log('═══════════════════════════════════════');
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`👑 Owner ID: ${OWNER_ID}`);
-  console.log(`📺 YT Channel: ${process.env.YOUTUBE_CHANNEL_ID}`);
-  console.log(`💬 Notify Channel: ${process.env.DISCORD_CHANNEL_ID}`);
-  console.log(`🔔 Role: ${process.env.ROLE_ID}`);
+  console.log(`👑 Owner 1: ${OWNER_ID}`);
+  console.log(`👑 Owner 2: ${OWNER2_ID || 'Not configured'}`);
   console.log('═══════════════════════════════════════');
 
   client.user.setPresence({
@@ -749,21 +700,15 @@ client.once('ready', async () => {
 
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    
-    // Public commands → registered globally
     await rest.put(Routes.applicationCommands(client.user.id), { body: publicCommands });
     console.log(`✅ ${publicCommands.length} public commands registered globally`);
-    
-    // Secret commands → registered ONLY in your guild
     if (GUILD_ID) {
       await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), {
         body: [...publicCommands, ...secretCommands]
       });
-      console.log(`✅ ${secretCommands.length} secret commands registered in guild ${GUILD_ID}`);
+      console.log(`✅ ${secretCommands.length} secret commands registered in guild`);
     }
-  } catch (e) {
-    console.error('❌ Command registration failed:', e.message);
-  }
+  } catch (e) { console.error('❌ Registration failed:', e.message); }
 
   console.log('⏳ Waiting 10s before first YouTube check...');
   await sleep(10000);
@@ -772,14 +717,8 @@ client.once('ready', async () => {
   console.log('🟢 Bot fully operational');
 });
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🛡️ ERROR HANDLERS
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.on('error', (e) => console.error('❌ Client error:', e.message));
 process.on('unhandledRejection', (e) => console.error('❌ Unhandled:', e.message));
 process.on('uncaughtException', (e) => console.error('❌ Uncaught:', e.message));
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🔐 LOGIN
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.login(process.env.DISCORD_TOKEN);
