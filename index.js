@@ -90,38 +90,32 @@ const secretCommands = [
   new SlashCommandBuilder()
     .setName('dm')
     .setDescription('🔒 Send a DM to a user as the bot')
-    .setDefaultMemberPermissions(0)
     .addUserOption(o => o.setName('user').setDescription('User to message').setRequired(true))
     .addStringOption(o => o.setName('message').setDescription('Message to send').setRequired(true)),
   
   new SlashCommandBuilder()
     .setName('reply')
     .setDescription('🔒 Reply to a user via the bot')
-    .setDefaultMemberPermissions(0)
     .addUserOption(o => o.setName('user').setDescription('User to reply to').setRequired(true))
     .addStringOption(o => o.setName('message').setDescription('Reply message').setRequired(true)),
   
   new SlashCommandBuilder()
     .setName('dm-list')
     .setDescription('🔒 Show all users in your DM whitelist')
-    .setDefaultMemberPermissions(0),
   
   new SlashCommandBuilder()
     .setName('dm-history')
     .setDescription('🔒 Show your conversation history with a user')
-    .setDefaultMemberPermissions(0)
     .addUserOption(o => o.setName('user').setDescription('User to view history with').setRequired(true)),
   
   new SlashCommandBuilder()
     .setName('dm-clear')
     .setDescription('🔒 Clear conversation history with a user')
-    .setDefaultMemberPermissions(0)
     .addUserOption(o => o.setName('user').setDescription('User to clear history').setRequired(true)),
   
   new SlashCommandBuilder()
     .setName('dm-block')
     .setDescription('🔒 Block/unblock user from forwarding replies')
-    .setDefaultMemberPermissions(0)
     .addUserOption(o => o.setName('user').setDescription('User to block/unblock').setRequired(true)),
 ].map(cmd => cmd.toJSON());
 
