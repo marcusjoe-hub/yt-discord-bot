@@ -1,8 +1,9 @@
 // ═══════════════════════════════════════════════════════
-// 🤖 REZE BLOX YT BOT — V4.0 (DUAL OWNER EDITION)
+// 🤖 REZE BLOX YT BOT — V4.1 (OWNER-TO-OWNER ENABLED)
 // 🛠️ Developed by chill_guy_rblx
 // 🔒 Separate DM systems for each owner
 // 📩 Text file history exports
+// ⚠️ Owners can DM each other (with warning)
 // ═══════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -35,7 +36,7 @@ const client = new Client({
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🔒 OWNER CONFIG (read from env)
+// 🔒 OWNER CONFIG
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const OWNER_ID = process.env.OWNER_ID;
 const OWNER2_ID = process.env.OWNER2_ID;
@@ -58,27 +59,21 @@ const botStartTime = Date.now();
 const VIDEO_CACHE_TTL = 60 * 1000;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 📩 DM RELAY SYSTEM — SEPARATE per owner
+// 📩 DM RELAY — SEPARATE per owner
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Structure: Map<ownerId, Set/Map> - each owner has own data
 const ownerData = new Map();
 
 function getOwnerData(ownerId) {
   if (!ownerData.has(ownerId)) {
     ownerData.set(ownerId, {
-      whitelist: new Set(),       // Users this owner has DM'd
-      history: new Map(),         // userId → array of messages
-      blocked: new Set(),         // Users blocked from this owner
-      activeTarget: null,         // Current chat target for this owner
-      conversationOwners: new Map() // userId → which owner started convo (for reply routing)
+      whitelist: new Set(),
+      history: new Map(),
+      blocked: new Set(),
+      activeTarget: null
     });
   }
   return ownerData.get(ownerId);
 }
-
-// Track which owner is "in charge" of each user (for reply routing)
-// When user X replies, only forward to the owner who started the convo with X
-const userToOwner = new Map(); // userId → ownerId
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 🎮 SLASH COMMANDS
@@ -260,7 +255,7 @@ async function checkYouTube() {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 📩 DM SYSTEM HELPERS
+// 📩 DM HELPERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function createDmEmbed(message, isReply = false) {
   return new EmbedBuilder()
@@ -308,7 +303,7 @@ async function forwardReplyToOwner(ownerId, fromUser, messageContent) {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 💬 MESSAGE EVENT — handles incoming DMs
+// 💬 MESSAGE EVENT
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
@@ -329,10 +324,6 @@ client.on('messageCreate', async (message) => {
       return message.reply('❌ Can\'t reply to yourself.').catch(()=>{});
     }
     
-    if (isOwner(data.activeTarget)) {
-      return message.reply('❌ Can\'t target another owner.').catch(()=>{});
-    }
-    
     try {
       await sendDM(data.activeTarget, content, true);
       saveToHistory(userId, data.activeTarget, 'sent', content);
@@ -344,8 +335,6 @@ client.on('messageCreate', async (message) => {
   }
   
   // ━━━ CASE 2: Non-owner DM'ing the bot ━━━
-  
-  // Find which owner has this user in their whitelist
   let targetOwner = null;
   for (const oid of OWNERS) {
     const data = getOwnerData(oid);
@@ -355,14 +344,10 @@ client.on('messageCreate', async (message) => {
     }
   }
   
-  // Not in ANY owner's whitelist → auto-reply once
   if (!targetOwner) {
-    // Check if we already auto-replied (use first owner's history as flag)
     const data = getOwnerData(OWNERS[0]);
     const existing = data.history.get(userId);
-    if (existing && existing.some(h => h.direction === 'auto-reply')) {
-      return; // Already auto-replied, ignore silently
-    }
+    if (existing && existing.some(h => h.direction === 'auto-reply')) return;
     
     try {
       const autoReply = new EmbedBuilder()
@@ -380,11 +365,9 @@ client.on('messageCreate', async (message) => {
     return;
   }
   
-  // Check if blocked by this owner
   const data = getOwnerData(targetOwner);
   if (data.blocked.has(userId)) return;
   
-  // Forward ONLY to the owner who started the convo
   await forwardReplyToOwner(targetOwner, message.author, content);
   saveToHistory(targetOwner, userId, 'received', content);
   try { await message.react('📨'); } catch (e) {}
@@ -399,20 +382,20 @@ client.on('interactionCreate', async (interaction) => {
   const userId = interaction.user.id;
   const isSecret = ['dm', 'reply', 'dm-list', 'dm-history', 'dm-clear', 'dm-block', 'dm-target', 'dm-stop'].includes(cmd);
   
-  // 🔒 SECURITY: only owners can use secret commands
   if (isSecret && !isOwner(userId)) {
     return interaction.reply({ content: '❌ Unknown command.', flags: MessageFlags.Ephemeral }).catch(() => {});
   }
 
   try {
-    // ━━━━━ /dm ━━━━━
+    // ━━━━━ /dm (Owner-to-Owner now allowed with warning) ━━━━━
     if (cmd === 'dm') {
       const user = interaction.options.getUser('user');
       const msg = interaction.options.getString('message');
       
       if (user.id === userId) return interaction.reply({ content: '❌ Can\'t DM yourself!', flags: MessageFlags.Ephemeral });
       if (user.bot) return interaction.reply({ content: '❌ Can\'t DM bots!', flags: MessageFlags.Ephemeral });
-      if (isOwner(user.id)) return interaction.reply({ content: '❌ Can\'t DM another owner!', flags: MessageFlags.Ephemeral });
+      
+      const isTargetOwner = isOwner(user.id);
       
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       try {
@@ -423,7 +406,7 @@ client.on('interactionCreate', async (interaction) => {
         saveToHistory(userId, user.id, 'sent', msg);
         
         const embed = new EmbedBuilder()
-          .setTitle('✅ DM Sent').setColor(0x00ff00)
+          .setTitle('✅ DM Sent').setColor(isTargetOwner ? 0xffaa00 : 0x00ff00)
           .addFields(
             { name: '👤 To', value: `${user.tag} (\`${user.id}\`)`, inline: false },
             { name: '📝 Message', value: msg.substring(0, 1024), inline: false },
@@ -431,6 +414,15 @@ client.on('interactionCreate', async (interaction) => {
           )
           .setFooter({ text: 'They\'re whitelisted. Their replies will forward to your DMs.' })
           .setTimestamp();
+        
+        if (isTargetOwner) {
+          embed.addFields({ 
+            name: '⚠️ WARNING - Owner-to-Owner DM', 
+            value: 'You\'re DMing another owner! Their replies forward to you AND yours forward to them — this can cause **infinite loops**.\n\n🛑 **Use `/dm-stop` when done chatting!**', 
+            inline: false 
+          });
+        }
+        
         await interaction.editReply({ embeds: [embed] });
       } catch (e) {
         await interaction.editReply(`❌ Failed: ${e.message}\n*(They may have DMs disabled)*`);
@@ -438,14 +430,15 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
     
-    // ━━━━━ /reply ━━━━━
+    // ━━━━━ /reply (Owner-to-Owner now allowed) ━━━━━
     if (cmd === 'reply') {
       const user = interaction.options.getUser('user');
       const msg = interaction.options.getString('message');
       
       if (user.id === userId) return interaction.reply({ content: '❌ Can\'t reply to yourself!', flags: MessageFlags.Ephemeral });
       if (user.bot) return interaction.reply({ content: '❌ Can\'t reply to bots!', flags: MessageFlags.Ephemeral });
-      if (isOwner(user.id)) return interaction.reply({ content: '❌ Can\'t reply to another owner!', flags: MessageFlags.Ephemeral });
+      
+      const isTargetOwner = isOwner(user.id);
       
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       try {
@@ -454,38 +447,56 @@ client.on('interactionCreate', async (interaction) => {
         data.whitelist.add(user.id);
         data.activeTarget = user.id;
         saveToHistory(userId, user.id, 'sent', msg);
-        await interaction.editReply({
-          embeds: [new EmbedBuilder()
-            .setTitle('✅ Reply Sent').setColor(0x00ff00)
-            .setDescription(`Replied to ${user.tag}`)
-            .addFields({ name: '📝 Message', value: msg.substring(0, 1024) })
-          ]
-        });
+        
+        const embed = new EmbedBuilder()
+          .setTitle('✅ Reply Sent').setColor(isTargetOwner ? 0xffaa00 : 0x00ff00)
+          .setDescription(`Replied to ${user.tag}`)
+          .addFields({ name: '📝 Message', value: msg.substring(0, 1024) });
+        
+        if (isTargetOwner) {
+          embed.addFields({ 
+            name: '⚠️ WARNING - Owner-to-Owner', 
+            value: 'You replied to another owner. Use `/dm-stop` when done to avoid loops!', 
+            inline: false 
+          });
+        }
+        
+        await interaction.editReply({ embeds: [embed] });
       } catch (e) {
         await interaction.editReply(`❌ Failed: ${e.message}`);
       }
       return;
     }
     
-    // ━━━━━ /dm-target ━━━━━
+    // ━━━━━ /dm-target (Owner-to-Owner now allowed) ━━━━━
     if (cmd === 'dm-target') {
       const user = interaction.options.getUser('user');
       
       if (user.id === userId) return interaction.reply({ content: '❌ Can\'t target yourself!', flags: MessageFlags.Ephemeral });
       if (user.bot) return interaction.reply({ content: '❌ Can\'t target bots!', flags: MessageFlags.Ephemeral });
-      if (isOwner(user.id)) return interaction.reply({ content: '❌ Can\'t target another owner!', flags: MessageFlags.Ephemeral });
+      
+      const isTargetOwner = isOwner(user.id);
       
       const data = getOwnerData(userId);
       data.activeTarget = user.id;
       data.whitelist.add(user.id);
       
       const embed = new EmbedBuilder()
-        .setTitle('🎯 Reply Target Set').setColor(0x00ff00)
+        .setTitle('🎯 Reply Target Set').setColor(isTargetOwner ? 0xffaa00 : 0x00ff00)
         .setDescription(`Now you can just DM the bot and it will forward to **${user.tag}**`)
         .addFields(
           { name: '👤 Target', value: `${user.tag} (\`${user.id}\`)`, inline: false },
           { name: '💡 Tip', value: 'Use `/dm-stop` to end this conversation', inline: false }
         );
+      
+      if (isTargetOwner) {
+        embed.addFields({ 
+          name: '⚠️ WARNING - Owner-to-Owner Chat', 
+          value: 'This is another owner! Both your messages forward to each other — this can cause **infinite loops** if you both forget to stop.\n\n🛑 **Use `/dm-stop` when done!**', 
+          inline: false 
+        });
+      }
+      
       return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
     
@@ -511,19 +522,20 @@ client.on('interactionCreate', async (interaction) => {
             const u = await client.users.fetch(id);
             const blocked = data.blocked.has(id) ? ' 🚫' : '';
             const active = id === data.activeTarget ? ' 🎯' : '';
+            const owner = isOwner(id) ? ' 👑' : '';
             const count = data.history.get(id)?.length || 0;
-            return `• ${u.tag} (\`${id}\`) — ${count} msgs${blocked}${active}`;
+            return `• ${u.tag} (\`${id}\`) — ${count} msgs${blocked}${active}${owner}`;
           } catch (e) { return `• Unknown (\`${id}\`)`; }
         })
       );
       const embed = new EmbedBuilder()
         .setTitle('📋 Your DM Whitelist').setDescription(users.join('\n'))
         .setColor(0x5865f2)
-        .setFooter({ text: `Total: ${data.whitelist.size} | 🎯 = active target | 🚫 = blocked` });
+        .setFooter({ text: `Total: ${data.whitelist.size} | 🎯 = active | 🚫 = blocked | 👑 = owner` });
       return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
     }
     
-    // ━━━━━ /dm-history (TEXT FILE → YOUR DMs) ━━━━━
+    // ━━━━━ /dm-history (text file → your DMs) ━━━━━
     if (cmd === 'dm-history') {
       const user = interaction.options.getUser('user');
       const data = getOwnerData(userId);
@@ -533,7 +545,6 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: `📭 No history with ${user.tag}`, flags: MessageFlags.Ephemeral });
       }
       
-      // Build text file content
       const lines = [
         `═══════════════════════════════════════════════`,
         `📜 DM HISTORY EXPORT`,
@@ -561,15 +572,12 @@ client.on('interactionCreate', async (interaction) => {
       const filename = `dm-history-${user.username}-${Date.now()}.txt`;
       const attachment = new AttachmentBuilder(buffer, { name: filename });
       
-      // Send to YOUR DMs (not in channel)
       try {
         const ownerUser = await client.users.fetch(userId);
         await ownerUser.send({
           content: `📜 **DM History Export**\nConversation with ${user.tag} — ${history.length} messages`,
           files: [attachment]
         });
-        
-        // Confirm in channel (ephemeral)
         return interaction.reply({
           content: `✅ History sent to your DMs as a text file! (${history.length} messages)`,
           flags: MessageFlags.Ephemeral
