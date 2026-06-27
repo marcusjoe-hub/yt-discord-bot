@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════
-// 🤖 REZE BLOX YT NOTIFICATION BOT - V2.0
+// 🤖 REZE BLOX YT NOTIFICATION BOT - V2.1 FIXED
 // 🛠️ Developed by chill_guy_rblx
+// 🚀 Optimized to avoid YouTube rate limits (429 errors)
 // ═══════════════════════════════════════════════════════
 
 require('dotenv').config();
@@ -17,16 +18,16 @@ const axios = require('axios');
 const express = require('express');
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🌐 KEEP-ALIVE WEB SERVER (for UptimeRobot)
+// 🌐 KEEP-ALIVE WEB SERVER
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const app = express();
-app.get('/', (req, res) => res.send('🟢 Bot is alive and running!'));
+app.get('/', (req, res) => res.send('🟢 Bot is alive!'));
 app.listen(process.env.PORT || 3000, () => 
   console.log('✅ Web server running')
 );
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🤖 DISCORD CLIENT SETUP
+// 🤖 DISCORD CLIENT
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
@@ -35,13 +36,17 @@ const client = new Client({
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 📊 GLOBAL STATE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const postedVideos = new Set();         // Tracks all videos we've already posted
-const durationCache = new Map();        // Caches video durations (saves API calls)
-let isFirstRun = true;                  // First run = don't ping, just memorize
-const botStartTime = Date.now();        // For uptime tracking
+const postedVideos = new Set();
+const durationCache = new Map();        // Persistent duration cache
+const videoCache = new Map();           // Cache of recent videos (5min TTL)
+let videoCacheTime = 0;
+let isFirstRun = true;
+const botStartTime = Date.now();
+
+const VIDEO_CACHE_TTL = 60 * 1000;      // Cache videos for 1 minute
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🎮 SLASH COMMAND DEFINITIONS
+// 🎮 SLASH COMMANDS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const commands = [
   new SlashCommandBuilder()
@@ -52,108 +57,162 @@ const commands = [
     .setDescription('⚡ Show the latest short from the channel'),
   new SlashCommandBuilder()
     .setName('ping')
-    .setDescription('🏓 Check if the bot is alive and see latency'),
+    .setDescription('🏓 Check if the bot is alive'),
   new SlashCommandBuilder()
     .setName('help')
     .setDescription('📋 Show all available commands'),
   new SlashCommandBuilder()
     .setName('channel')
-    .setDescription('📺 Show YouTube channel stats (subs, views, videos)'),
+    .setDescription('📺 Show YouTube channel stats'),
   new SlashCommandBuilder()
     .setName('subscribe')
-    .setDescription('🔔 Get the link to subscribe to the channel'),
+    .setDescription('🔔 Get the link to subscribe'),
 ].map(cmd => cmd.toJSON());
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🎬 YOUTUBE API HELPERS
+// 🎬 YOUTUBE API - OPTIMIZED (FEWER CALLS!)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
- * Get video duration in seconds (with caching to save API quota)
+ * Sleep helper for delays
  */
-async function getVideoDuration(videoId) {
-  // Check cache first
-  if (durationCache.has(videoId)) {
-    return durationCache.get(videoId);
-  }
-
-  try {
-    const res = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
-      params: {
-        key: process.env.YOUTUBE_API_KEY,
-        id: videoId,
-        part: 'contentDetails'
-      },
-      timeout: 10000
-    });
-
-    const duration = res.data.items[0]?.contentDetails?.duration || '';
-    const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
-    const hours = parseInt(match?.[1] || 0);
-    const minutes = parseInt(match?.[2] || 0);
-    const seconds = parseInt(match?.[3] || 0);
-    const totalSeconds = hours * 3600 + minutes * 60 + seconds;
-
-    // Cache it
-    durationCache.set(videoId, totalSeconds);
-    return totalSeconds;
-  } catch (error) {
-    console.error(`⚠️ Duration fetch failed for ${videoId}:`, error.message);
-    return 999; // Treat as regular video if unknown
-  }
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
- * Smart Short detection - catches all common short patterns
+ * 🚀 BATCH FETCH: Get durations for MULTIPLE videos in ONE API call
+ * This is the key optimization - instead of 10 API calls, we make 1
+ */
+async function batchFetchDurations(videoIds) {
+  // Filter out videos we already have cached
+  const needToFetch = videoIds.filter(id => !durationCache.has(id));
+  
+  if (needToFetch.length === 0) {
+    // All cached, return from cache
+    return videoIds.reduce((acc, id) => {
+      acc[id] = durationCache.get(id);
+      return acc;
+    }, {});
+  }
+
+  try {
+    // YouTube API supports comma-separated IDs (up to 50 at once!)
+    const res = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+      params: {
+        key: process.env.YOUTUBE_API_KEY,
+        id: needToFetch.join(','),  // 🚀 ALL videos in ONE call
+        part: 'contentDetails'
+      },
+      timeout: 15000
+    });
+
+    // Parse durations and cache them
+    for (const item of (res.data.items || [])) {
+      const duration = item.contentDetails?.duration || '';
+      const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+      const hours = parseInt(match?.[1] || 0);
+      const minutes = parseInt(match?.[2] || 0);
+      const seconds = parseInt(match?.[3] || 0);
+      const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+      durationCache.set(item.id, totalSeconds);
+    }
+  } catch (error) {
+    console.error(`⚠️ Batch duration fetch failed:`, error.message);
+  }
+
+  // Return all requested durations (from cache after batch fetch)
+  return videoIds.reduce((acc, id) => {
+    acc[id] = durationCache.get(id) || 999;
+    return acc;
+  }, {});
+}
+
+/**
+ * Smart Short detection
  */
 function isShortVideo(title, durationSec) {
   const titleLower = (title || '').toLowerCase();
   const shortKeywords = ['#short', '#shorts', '#ytshort', '#ytshorts'];
-  
-  // Check title hashtags
   const hasShortTag = shortKeywords.some(tag => titleLower.includes(tag));
-  
-  // Duration check (Shorts are 60 sec or less, give 5sec buffer for accuracy)
   const isShortDuration = durationSec > 0 && durationSec <= 65;
-  
   return hasShortTag || isShortDuration;
 }
 
 /**
- * Fetch latest videos from YouTube channel
+ * Fetch latest videos (with 1-minute cache to avoid spam)
  */
-async function fetchLatestVideos(maxResults = 10) {
-  const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
-    params: {
-      key: process.env.YOUTUBE_API_KEY,
-      channelId: process.env.YOUTUBE_CHANNEL_ID,
-      part: 'snippet',
-      order: 'date',
-      maxResults: maxResults,
-      type: 'video'
-    },
-    timeout: 10000
-  });
-  return res.data.items || [];
+async function fetchLatestVideos(force = false) {
+  const now = Date.now();
+  
+  // Use cache if fresh (saves API calls!)
+  if (!force && videoCache.size > 0 && (now - videoCacheTime) < VIDEO_CACHE_TTL) {
+    return Array.from(videoCache.values());
+  }
+
+  try {
+    const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+      params: {
+        key: process.env.YOUTUBE_API_KEY,
+        channelId: process.env.YOUTUBE_CHANNEL_ID,
+        part: 'snippet',
+        order: 'date',
+        maxResults: 10,
+        type: 'video'
+      },
+      timeout: 15000
+    });
+
+    const videos = res.data.items || [];
+    
+    // Cache the videos
+    videoCache.clear();
+    for (const v of videos) {
+      videoCache.set(v.id.videoId, v);
+    }
+    videoCacheTime = now;
+    
+    return videos;
+  } catch (error) {
+    console.error('⚠️ Fetch videos failed:', error.message);
+    // Return cached videos if available, even if expired
+    if (videoCache.size > 0) {
+      return Array.from(videoCache.values());
+    }
+    throw error;
+  }
 }
 
 /**
- * Fetch YouTube channel information
+ * Fetch channel info (cached)
  */
+let channelInfoCache = null;
+let channelInfoCacheTime = 0;
+
 async function fetchChannelInfo() {
+  const now = Date.now();
+  
+  // Cache channel info for 5 minutes
+  if (channelInfoCache && (now - channelInfoCacheTime) < 5 * 60 * 1000) {
+    return channelInfoCache;
+  }
+
   const res = await axios.get('https://www.googleapis.com/youtube/v3/channels', {
     params: {
       key: process.env.YOUTUBE_API_KEY,
       id: process.env.YOUTUBE_CHANNEL_ID,
       part: 'snippet,statistics'
     },
-    timeout: 10000
+    timeout: 15000
   });
-  return res.data.items[0];
+  
+  channelInfoCache = res.data.items[0];
+  channelInfoCacheTime = now;
+  return channelInfoCache;
 }
 
 /**
- * Create a beautiful embed for a video (with optional ping)
+ * Create video embed
  */
 function createVideoEmbed(video, isShort) {
   const videoId = video.id.videoId;
@@ -161,18 +220,18 @@ function createVideoEmbed(video, isShort) {
   const thumbnail = video.snippet.thumbnails.high.url;
   const publishedAt = new Date(video.snippet.publishedAt).toLocaleString();
   
-  const baseUrl = isShort 
+  const url = isShort 
     ? `https://www.youtube.com/shorts/${videoId}` 
     : `https://www.youtube.com/watch?v=${videoId}`;
   
   return new EmbedBuilder()
     .setTitle(`${isShort ? '⚡' : '🎬'} ${title}`)
-    .setURL(baseUrl)
+    .setURL(url)
     .setColor(isShort ? 0x00ff99 : 0xff0000)
     .setImage(thumbnail)
     .addFields(
       { name: '📅 Posted', value: publishedAt, inline: true },
-      { name: '▶️ Watch', value: `[Click Here](${baseUrl})`, inline: true }
+      { name: '▶️ Watch', value: `[Click Here](${url})`, inline: true }
     )
     .setFooter({ 
       text: isShort ? 'Reze Blox YT • Latest Short' : 'Reze Blox YT • Latest Video' 
@@ -180,73 +239,102 @@ function createVideoEmbed(video, isShort) {
     .setTimestamp();
 }
 
+/**
+ * Find latest video or short (uses batch API!)
+ */
+async function findLatestByType(wantShort) {
+  const videos = await fetchLatestVideos();
+  if (videos.length === 0) return null;
+
+  // BATCH fetch all durations in ONE call (saves 9 API calls!)
+  const videoIds = videos.map(v => v.id.videoId);
+  const durations = await batchFetchDurations(videoIds);
+
+  // Find first matching video
+  for (const v of videos) {
+    const dur = durations[v.id.videoId] || 999;
+    const isShort = isShortVideo(v.snippet.title, dur);
+    if (isShort === wantShort) {
+      return v;
+    }
+  }
+  return null;
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🔄 MAIN YOUTUBE CHECK LOOP (PINGS ROLE ON NEW UPLOADS)
+// 🔄 MAIN YOUTUBE CHECK LOOP (AUTO-PINGS)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function checkYouTube() {
   try {
-    const videos = await fetchLatestVideos();
-    if (!videos || videos.length === 0) {
-      console.log('⚠️ No videos returned from API');
-      return;
-    }
+    const videos = await fetchLatestVideos(true); // Force fresh fetch
+    if (!videos || videos.length === 0) return;
 
-    // First run: memorize all current videos, don't ping
+    // First run: memorize, don't ping
     if (isFirstRun) {
       isFirstRun = false;
-      for (const video of videos) {
-        postedVideos.add(video.id.videoId);
+      for (const v of videos) {
+        postedVideos.add(v.id.videoId);
       }
-      console.log(`✅ First run complete - ${postedVideos.size} videos memorized (no pings sent)`);
+      console.log(`✅ First run done - ${postedVideos.size} videos memorized (no pings)`);
       return;
     }
 
     const channel = client.channels.cache.get(process.env.DISCORD_CHANNEL_ID);
-    if (!channel) {
-      console.log('❌ Discord channel not found - check DISCORD_CHANNEL_ID');
-      return;
-    }
+    if (!channel) return console.log('❌ Discord channel not found');
 
     const rolePing = `<@&${process.env.ROLE_ID}>`;
+    
+    // Find any NEW videos
+    const newVideos = videos.filter(v => !postedVideos.has(v.id.videoId));
+    if (newVideos.length === 0) return;
 
-    // Process oldest-new first (so videos appear in correct order)
-    for (const video of videos.reverse()) {
+    // BATCH fetch durations for all new videos in ONE call
+    const newVideoIds = newVideos.map(v => v.id.videoId);
+    const durations = await batchFetchDurations(newVideoIds);
+
+    // Post oldest-first
+    for (const video of newVideos.reverse()) {
       const videoId = video.id.videoId;
-      
-      // Skip if already posted
-      if (postedVideos.has(videoId)) continue;
-      
-      // Mark as posted IMMEDIATELY to prevent double-posting on errors
-      postedVideos.add(videoId);
+      postedVideos.add(videoId); // Mark immediately
 
       const title = video.snippet.title;
-      const duration = await getVideoDuration(videoId);
+      const duration = durations[videoId] || 999;
       const isShort = isShortVideo(title, duration);
 
       const embed = createVideoEmbed(video, isShort);
 
-      const message = await channel.send({ 
-        content: `${rolePing} ${isShort ? '🩳 **NEW SHORT UPLOADED!**' : '🎥 **NEW VIDEO UPLOADED!**'}`, 
-        embeds: [embed] 
-      });
-
-      // Auto-react with emojis for extra hype ✨
       try {
-        await message.react('🎉');
-        await message.react('🔔');
-      } catch (e) {
-        // Reactions aren't critical, ignore if they fail
-      }
+        const message = await channel.send({
+          content: `${rolePing} ${isShort ? '🩳 **NEW SHORT UPLOADED!**' : '🎥 **NEW VIDEO UPLOADED!**'}`,
+          embeds: [embed]
+        });
 
-      console.log(`✅ ${isShort ? 'SHORT' : 'VIDEO'} notification sent: "${title}"`);
+        // Auto-react for hype ✨
+        try {
+          await message.react('🎉');
+          await sleep(500);
+          await message.react('🔔');
+        } catch (e) {}
+
+        console.log(`✅ ${isShort ? 'SHORT' : 'VIDEO'} notification sent: "${title}"`);
+        
+        // Small delay between multiple posts
+        await sleep(1500);
+      } catch (sendErr) {
+        console.error(`❌ Failed to send notification:`, sendErr.message);
+      }
     }
   } catch (error) {
-    console.error('❌ YouTube check error:', error.message);
+    if (error.response?.status === 429) {
+      console.error('⚠️ Rate limited (429) - will retry next interval');
+    } else {
+      console.error('❌ YouTube check error:', error.message);
+    }
   }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🎮 SLASH COMMAND HANDLERS (NO PINGS - USER REQUESTS)
+// 🎮 SLASH COMMAND HANDLERS (NO PINGS)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
@@ -254,7 +342,7 @@ client.on('interactionCreate', async (interaction) => {
   const cmd = interaction.commandName;
 
   try {
-    // ━━━━━━━━━━━━━━━ /ping ━━━━━━━━━━━━━━━
+    // ━━━ /ping ━━━
     if (cmd === 'ping') {
       const uptime = Math.floor((Date.now() - botStartTime) / 1000);
       const hours = Math.floor(uptime / 3600);
@@ -269,16 +357,16 @@ client.on('interactionCreate', async (interaction) => {
           { name: '⏰ Uptime', value: `${hours}h ${minutes}m ${seconds}s`, inline: true },
           { name: '✅ Status', value: 'Online & Watching', inline: true },
           { name: '📺 Videos Tracked', value: `${postedVideos.size}`, inline: true },
-          { name: '💾 Cache Size', value: `${durationCache.size}`, inline: true },
-          { name: '🔄 Check Interval', value: 'Every 5 minutes', inline: true }
+          { name: '💾 Duration Cache', value: `${durationCache.size}`, inline: true },
+          { name: '🔄 Check Every', value: '5 minutes', inline: true }
         )
-        .setFooter({ text: 'Bot is alive and watching for new uploads!' })
+        .setFooter({ text: 'Bot is alive and watching for uploads!' })
         .setTimestamp();
 
       return await interaction.reply({ embeds: [embed] });
     }
 
-    // ━━━━━━━━━━━━━━━ /help ━━━━━━━━━━━━━━━
+    // ━━━ /help ━━━
     if (cmd === 'help') {
       const embed = new EmbedBuilder()
         .setTitle('📋 Bot Commands Menu')
@@ -292,13 +380,13 @@ client.on('interactionCreate', async (interaction) => {
           { name: '🏓 `/ping`', value: 'Check if bot is online', inline: false },
           { name: '📋 `/help`', value: 'Show this menu', inline: false },
         )
-        .setFooter({ text: '🚨 Bot auto-pings the role whenever a new video drops!' })
+        .setFooter({ text: '🚨 Bot auto-pings the role when a new video drops!' })
         .setTimestamp();
 
       return await interaction.reply({ embeds: [embed] });
     }
 
-    // ━━━━━━━━━━━━━━━ /channel ━━━━━━━━━━━━━━━
+    // ━━━ /channel ━━━
     if (cmd === 'channel') {
       await interaction.deferReply();
       const ch = await fetchChannelInfo();
@@ -306,7 +394,7 @@ client.on('interactionCreate', async (interaction) => {
       const embed = new EmbedBuilder()
         .setTitle(`📺 ${ch.snippet.title}`)
         .setURL(`https://www.youtube.com/channel/${process.env.YOUTUBE_CHANNEL_ID}`)
-        .setDescription(ch.snippet.description?.substring(0, 200) || 'No description available')
+        .setDescription(ch.snippet.description?.substring(0, 200) || 'No description')
         .setColor(0xff0000)
         .setThumbnail(ch.snippet.thumbnails.high.url)
         .addFields(
@@ -320,7 +408,7 @@ client.on('interactionCreate', async (interaction) => {
       return await interaction.editReply({ embeds: [embed] });
     }
 
-    // ━━━━━━━━━━━━━━━ /subscribe ━━━━━━━━━━━━━━━
+    // ━━━ /subscribe ━━━
     if (cmd === 'subscribe') {
       const subUrl = `https://www.youtube.com/channel/${process.env.YOUTUBE_CHANNEL_ID}?sub_confirmation=1`;
       
@@ -328,7 +416,7 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle('🔔 Subscribe to the channel!')
         .setURL(subUrl)
         .setDescription(
-          '👆 **Click the title above to subscribe!**\n\n' +
+          '👆 **Click the title to subscribe!**\n\n' +
           'Don\'t forget to hit the 🔔 bell so you never miss an upload!\n\n' +
           '✨ Thanks for the support!'
         )
@@ -338,50 +426,32 @@ client.on('interactionCreate', async (interaction) => {
       return await interaction.reply({ embeds: [embed] });
     }
 
-    // ━━━━━━━━━━━━━━━ /latest (NO PING) ━━━━━━━━━━━━━━━
+    // ━━━ /latest (NO PING) ━━━
     if (cmd === 'latest') {
       await interaction.deferReply();
-      const videos = await fetchLatestVideos();
+      const video = await findLatestByType(false);
       
-      let latestVideo = null;
-      for (const v of videos) {
-        const dur = await getVideoDuration(v.id.videoId);
-        if (!isShortVideo(v.snippet.title, dur)) {
-          latestVideo = v;
-          break;
-        }
+      if (!video) {
+        return await interaction.editReply('❌ No regular videos found!');
       }
 
-      if (!latestVideo) {
-        return await interaction.editReply('❌ No regular videos found on the channel!');
-      }
-
-      const embed = createVideoEmbed(latestVideo, false);
+      const embed = createVideoEmbed(video, false);
       return await interaction.editReply({ 
         content: '🎥 **Latest Video:**', 
         embeds: [embed] 
       });
     }
 
-    // ━━━━━━━━━━━━━━━ /latestshort (NO PING) ━━━━━━━━━━━━━━━
+    // ━━━ /latestshort (NO PING) ━━━
     if (cmd === 'latestshort') {
       await interaction.deferReply();
-      const videos = await fetchLatestVideos();
+      const video = await findLatestByType(true);
       
-      let latestShort = null;
-      for (const v of videos) {
-        const dur = await getVideoDuration(v.id.videoId);
-        if (isShortVideo(v.snippet.title, dur)) {
-          latestShort = v;
-          break;
-        }
+      if (!video) {
+        return await interaction.editReply('❌ No shorts found!');
       }
 
-      if (!latestShort) {
-        return await interaction.editReply('❌ No shorts found on the channel!');
-      }
-
-      const embed = createVideoEmbed(latestShort, true);
+      const embed = createVideoEmbed(video, true);
       return await interaction.editReply({ 
         content: '🩳 **Latest Short:**', 
         embeds: [embed] 
@@ -391,73 +461,64 @@ client.on('interactionCreate', async (interaction) => {
   } catch (error) {
     console.error(`❌ Command error (${cmd}):`, error.message);
     
-    // Reply with error message (only if not already replied)
+    let errorMsg = '❌ Something went wrong. Try again in a minute!';
+    if (error.response?.status === 429) {
+      errorMsg = '⚠️ Too many requests! Please wait a minute and try again.';
+    } else if (error.response?.status === 403) {
+      errorMsg = '❌ YouTube API issue. Try again later.';
+    }
+
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply('❌ Something went wrong. Try again later!');
+        await interaction.editReply(errorMsg);
       } else {
-        await interaction.reply({ content: '❌ Something went wrong. Try again later!', ephemeral: true });
+        await interaction.reply({ content: errorMsg, ephemeral: true });
       }
-    } catch (e) {
-      // Silent fail if we can't reply
-    }
+    } catch (e) {}
   }
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🚀 BOT STARTUP
+// 🚀 STARTUP
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 client.once('ready', async () => {
   console.log('═══════════════════════════════════════');
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`📺 Tracking channel: ${process.env.YOUTUBE_CHANNEL_ID}`);
-  console.log(`💬 Notifying in channel: ${process.env.DISCORD_CHANNEL_ID}`);
-  console.log(`🔔 Pinging role: ${process.env.ROLE_ID}`);
+  console.log(`📺 Channel: ${process.env.YOUTUBE_CHANNEL_ID}`);
+  console.log(`💬 Notify: ${process.env.DISCORD_CHANNEL_ID}`);
+  console.log(`🔔 Role: ${process.env.ROLE_ID}`);
   console.log('═══════════════════════════════════════');
 
-  // Set custom 24/7 status
+  // Set status
   client.user.setPresence({
-    activities: [{ 
-      name: 'Reze Blox YT 📺', 
-      type: ActivityType.Watching 
-    }],
+    activities: [{ name: 'Reze Blox YT 📺', type: ActivityType.Watching }],
     status: 'online'
   });
-  console.log('✅ Status set to "Watching Reze Blox YT"');
 
-  // Register slash commands
+  // Register commands
   try {
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    await rest.put(
-      Routes.applicationCommands(client.user.id), 
-      { body: commands }
-    );
-    console.log(`✅ ${commands.length} slash commands registered globally`);
-  } catch (error) {
-    console.error('❌ Failed to register commands:', error.message);
+    await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+    console.log(`✅ ${commands.length} slash commands registered`);
+  } catch (e) {
+    console.error('❌ Command registration failed:', e.message);
   }
 
-  // Start YouTube monitoring
-  console.log('🔄 Starting YouTube monitor...');
+  // Wait a bit before first check (avoid hitting limits at startup)
+  console.log('⏳ Waiting 10s before first YouTube check...');
+  await sleep(10000);
+  
   await checkYouTube();
-  setInterval(checkYouTube, 5 * 60 * 1000); // Every 5 minutes
-  console.log('🟢 Bot fully operational - monitoring every 5 minutes');
+  setInterval(checkYouTube, 5 * 60 * 1000);
+  console.log('🟢 Bot fully operational');
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 🛡️ ERROR HANDLERS (PREVENT CRASHES)
+// 🛡️ ERROR HANDLERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-client.on('error', (error) => {
-  console.error('❌ Discord client error:', error.message);
-});
-
-process.on('unhandledRejection', (error) => {
-  console.error('❌ Unhandled promise rejection:', error.message);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught exception:', error.message);
-});
+client.on('error', (e) => console.error('❌ Client error:', e.message));
+process.on('unhandledRejection', (e) => console.error('❌ Unhandled:', e.message));
+process.on('uncaughtException', (e) => console.error('❌ Uncaught:', e.message));
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 🔐 LOGIN
