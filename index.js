@@ -101,7 +101,7 @@ const secretCommands = [
   
   new SlashCommandBuilder()
     .setName('dm-list')
-    .setDescription('🔒 Show all users in your DM whitelist')
+    .setDescription('🔒 Show all users in your DM whitelist'),
   
   new SlashCommandBuilder()
     .setName('dm-history')
